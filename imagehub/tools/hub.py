@@ -24,6 +24,8 @@ sys.path.insert(0, '../../imagezmq/imagezmq') # for testing
 import imagezmq
 from tools.utils import interval_timer
 from tools.hubhealth import HealthMonitor
+import simplejpeg
+from node_monitor import NodeMonitor
 
 class ImageHub:
     """ Contains the attributes and methods of an imagehub
@@ -44,20 +46,23 @@ class ImageHub:
         # Check that numpy and OpenCV are OK; will get traceback error if not
         self.tiny_image = np.zeros((3,3), dtype="uint8")  # tiny blank image
         ret_code, jpg_buffer = cv2.imencode(
-            ".jpg", self.tiny_image, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+             ".jpg", self.tiny_image, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+        #jpg_buffer = simplejpeg.encode_jpeg(jpg_buffer, quality=95,colorspace='BGR')
         self.tiny_jpg = jpg_buffer # matching tiny blank jpeg
 
         # image queue of (node_and_view, image, type) to write to image directory
         self.image_q = deque(maxlen=settings.queuemax)
         # start system health monitoring & get system type (RPi vs Mac etc)
         self.health = HealthMonitor(settings)
-
         self.userdir = settings.userdir
 
         # open ZMQ hub using imagezmq
         self.image_hub = imagezmq.ImageHub()
         self.receive_next = self.image_hub.recv_jpg  # assume receving jpg
         self.send_reply = self.image_hub.send_reply
+
+        self.node_monitor = NodeMonitor(2,2)
+
 
         # check that data and log directories exist; create them if not
         # see docs for data directory structure including logs and images
@@ -120,16 +125,21 @@ class ImageHub:
             return b'OK'
         type = message[1]  # type is the second delimited field in text
         t0 = type[0]  # the first character of type is unique & compares faster
-        if t0 == 'H':  # Heartbeat message; return before testing anything else
-            return b'OK'
         node_and_view = message[0].strip().replace(' ', '-')
+
+        # add periodic to the image name so the librarian can find this image
+        if 'Heartbeat' in text:
+            node_and_view += '-Heartbeat'#print(text)
+            print('received heartbeat image')
+
         # datetime.now().isoformat() looks like '2013-11-18T08:18:31.809000'
         timestamp = datetime.now().isoformat().replace(':', '.')
         image_filename = node_and_view + '-' + timestamp
 
         if t0 == "i":  # image
             pass  # ignore image type; only saving jpg images for now
-        elif t0 == 'j':  # jpg; append to image_q
+        elif t0 == 'j' or t0 == 'H':  # jpg; append to image_q
+            #jpg_buffer     = simplejpeg.decode_jpeg( image, colorspace='BGR')                 
             self.image_q.append((image_filename, image, t0,))
             # writing image files from image_q is normally done in a thread
             # but for unthreaded testing, uncomment below to write every image
@@ -137,6 +147,13 @@ class ImageHub:
         else:
             log_text = text  # may strip spaces later?
             self.log.info(log_text)
+
+        # log the periodic message so that 2 messages do not have to sent by the image node
+        # this also helps the time stamps of the image and the log message
+        if 'Heartbeat' in text:
+            log_text = message[0] + '|Heartbeat|still'
+            self.log.info(log_text)            
+            print(timestamp," - ",log_text)
         return b'OK'
 
     def image_writer(self):
